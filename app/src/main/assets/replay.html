@@ -744,6 +744,41 @@ const img   = document.getElementById('replay-img');
 const imgCache = new Map();
 
 /* ═══════════════════════════════════════════════════════════
+   NATIVE IMAGE FETCH (Android)
+   JS เรียก AndroidBridge.fetchImage(url, callbackId)
+   Java โหลดรูปผ่าน HttpURLConnection (handle redirect ได้)
+   แล้วส่งกลับมาเป็น data:image/...;base64,...
+═══════════════════════════════════════════════════════════ */
+let _cbCounter = 0;
+window._imgCallback = function(callbackId, dataUri, err) {
+  const cb = window._imgCallbacks && window._imgCallbacks[callbackId];
+  if (cb) {
+    delete window._imgCallbacks[callbackId];
+    cb(dataUri, err);
+  }
+};
+window._imgCallbacks = {};
+
+function loadImageNative(url, onSuccess, onError) {
+  // ถ้าอยู่ใน Android WebView ให้ใช้ Java fetch (bypass CORS + redirect)
+  if (typeof AndroidBridge !== 'undefined' && AndroidBridge.fetchImage) {
+    const cbId = 'cb_' + (++_cbCounter);
+    window._imgCallbacks[cbId] = function(dataUri, err) {
+      if (dataUri) {
+        onSuccess(dataUri);
+      } else {
+        // Java fetch ล้มเหลว → fallback ลอง img.src ตรงๆ
+        onError(err || 'fetch failed');
+      }
+    };
+    AndroidBridge.fetchImage(url, cbId);
+  } else {
+    // Web browser: ใช้ img.src ตามปกติ
+    onSuccess(url);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
    DATA LOADING
 ═══════════════════════════════════════════════════════════ */
 async function loadData(showSplash = true) {
@@ -924,19 +959,28 @@ function renderFrame() {
     loader.style.display = 'none';
   } else {
     const newImg = new Image();
-    newImg.onload = () => {
-      imgCache.set(url, newImg);
-      if (SOURCE[idx] === e) {
-        applyImage(newImg, e);
+    // ใช้ loadImageNative: Android → Java fetch (handle redirect), Web → img.src ตรงๆ
+    loadImageNative(url,
+      (src) => {
+        newImg.onload = () => {
+          imgCache.set(url, newImg);
+          if (SOURCE[idx] === e) {
+            applyImage(newImg, e);
+            loader.style.display = 'none';
+          }
+        };
+        newImg.onerror = () => {
+          loader.style.display = 'none';
+          toast('⚠️ Image load failed');
+        };
+        newImg.src = src;
+        imgCache.set(url, newImg);
+      },
+      (err) => {
         loader.style.display = 'none';
+        toast('⚠️ Image load failed');
       }
-    };
-    newImg.onerror = () => {
-      loader.style.display = 'none';
-      toast('⚠️ Image load failed');
-    };
-    newImg.src = url;
-    imgCache.set(url, newImg);
+    );
   }
 
   // Update overlay
@@ -997,7 +1041,10 @@ function preloadAround(ci) {
     keep.add(url);
     if (!imgCache.has(url)) {
       const pi = new Image();
-      pi.src = url;
+      loadImageNative(url,
+        (src) => { pi.src = src; },
+        () => {}
+      );
       imgCache.set(url, pi);
     }
   }
