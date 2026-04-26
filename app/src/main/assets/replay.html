@@ -849,10 +849,42 @@ function updateTopbarInfo() {
 
 /* ═══════════════════════════════════════════════════════════
    IMAGE URL
+   Strategy:
+   1. ถ้ามี drive_public_url → แปลงเป็น lh3.googleusercontent.com/d/FILE_ID
+      (direct URL ไม่มี redirect chain → ทำงานได้ดีใน Android WebView)
+   2. ถ้าไม่มี drive_public_url → fallback ไปยัง GitHub raw
 ═══════════════════════════════════════════════════════════ */
+function extractDriveId(url) {
+  if (!url) return null;
+  // รองรับ formats:
+  // https://drive.google.com/file/d/FILE_ID/view
+  // https://drive.google.com/file/d/FILE_ID/preview
+  // https://drive.google.com/open?id=FILE_ID
+  // https://drive.google.com/thumbnail?id=FILE_ID&sz=...
+  // https://drive.google.com/uc?id=FILE_ID&export=view
+  // https://lh3.googleusercontent.com/d/FILE_ID
+  var m;
+  m = url.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+  if (m) return m[1];
+  m = url.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
+  if (m) return m[1];
+  return null;
+}
+
 function getUrl(e) {
   if (e.drive_public_url && e.drive_public_url.trim()) {
-    return e.drive_public_url.trim().replace(/sz=s\d+-[a-z0-9]+-v1|sz=s0-v1/i, 'sz=s1600-rw-v1');
+    var raw = e.drive_public_url.trim();
+    // ถ้าเป็น lh3 URL อยู่แล้ว → ใช้เลย
+    if (raw.indexOf('lh3.googleusercontent.com') !== -1) {
+      return raw;
+    }
+    // ดึง File ID แล้วสร้าง lh3 URL ใหม่ (ไม่มี redirect, ไม่ต้อง auth สำหรับ public files)
+    var fileId = extractDriveId(raw);
+    if (fileId) {
+      return 'https://lh3.googleusercontent.com/d/' + fileId;
+    }
+    // ถ้าดึง ID ไม่ได้ → ใช้ URL เดิม (fallback)
+    return raw;
   }
   return 'https://raw.githubusercontent.com/sp33dz/tv-screenshot/refs/heads/main/gallery/screenshots/' + e.path;
 }

@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.view.View;
 import android.view.WindowManager;
+import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -74,6 +75,15 @@ public class MainActivity extends AppCompatActivity {
         webView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
         webView.setScrollbarFadingEnabled(true);
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+
+        // Enable third-party cookies (required for Google Drive / lh3.googleusercontent.com)
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        cookieManager.setAcceptThirdPartyCookies(webView, true);
+
+        // Set User-Agent ให้ดูเหมือน Chrome browser เพื่อให้ Google serve รูปภาพได้
+        String defaultUA = settings.getUserAgentString();
+        settings.setUserAgentString(defaultUA.replace("wv", "") + " Chrome/120.0.0.0");
 
         // JavaScript bridge
         webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
