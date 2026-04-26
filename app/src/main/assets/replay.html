@@ -704,12 +704,156 @@ input, textarea { user-select: text; -webkit-user-select: text; }
 </div><!-- end #app -->
 
 <!-- Toast -->
+<!-- Debug Panel (shake to toggle) -->
+<div id="debug-panel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.92);z-index:9999;overflow-y:auto;padding:12px;font-family:monospace;font-size:11px;color:#00ff88;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;border-bottom:1px solid #333;padding-bottom:6px;">
+    <b style="color:#fff;font-size:14px">🐛 Debug Log</b>
+    <div style="display:flex;gap:8px;">
+      <button onclick="testImageLoad()" style="background:#0088ff;color:#fff;border:none;padding:4px 10px;border-radius:4px;font-size:11px;">Test IMG</button>
+      <button onclick="copyDebugLog()" style="background:#444;color:#fff;border:none;padding:4px 10px;border-radius:4px;font-size:11px;">Copy Log</button>
+      <button onclick="clearDebugLog()" style="background:#444;color:#fff;border:none;padding:4px 10px;border-radius:4px;font-size:11px;">Clear</button>
+      <button onclick="toggleDebug()" style="background:#c0392b;color:#fff;border:none;padding:4px 10px;border-radius:4px;font-size:11px;">✕ Close</button>
+    </div>
+  </div>
+  <div id="debug-log"></div>
+</div>
+
 <div id="toast"></div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════
-   CONSTANTS & STATE
+   DEBUG SYSTEM
+   - เขย่าโทรศัพท์ 3 ครั้ง หรือ กด topbar-title 5 ครั้ง เพื่อเปิด
+   - แสดง log real-time บนหน้าจอ
+   - ดักจับ console.log / console.error / uncaught errors
 ═══════════════════════════════════════════════════════════ */
+const _debugLines = [];
+let _debugVisible = false;
+let _tapCount = 0, _tapTimer = null;
+
+function dbg(level, ...args) {
+  const ts = new Date().toISOString().substr(11,12);
+  const msg = args.map(a => {
+    try { return (typeof a === 'object') ? JSON.stringify(a) : String(a); } catch(e) { return String(a); }
+  }).join(' ');
+  const colors = { LOG:'#aaffcc', WARN:'#ffdd44', ERR:'#ff4444', IMG:'#44aaff', NET:'#ff88ff' };
+  const line = `<div style="border-bottom:1px solid #1a2a1a;padding:2px 0;color:${colors[level]||'#aaffcc'}"><span style="color:#555">${ts}</span> <b>[${level}]</b> ${msg}</div>`;
+  _debugLines.push(line);
+  if (_debugLines.length > 200) _debugLines.shift();
+  const el = document.getElementById('debug-log');
+  if (el && _debugVisible) {
+    el.innerHTML = _debugLines.join('');
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+function toggleDebug() {
+  _debugVisible = !_debugVisible;
+  const panel = document.getElementById('debug-panel');
+  panel.style.display = _debugVisible ? 'block' : 'none';
+  if (_debugVisible) {
+    const el = document.getElementById('debug-log');
+    el.innerHTML = _debugLines.join('');
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+function clearDebugLog() {
+  _debugLines.length = 0;
+  const el = document.getElementById('debug-log');
+  if (el) el.innerHTML = '';
+}
+
+function copyDebugLog() {
+  const text = _debugLines.map(l => l.replace(/<[^>]+>/g, '')).join('\n');
+  if (typeof AndroidBridge !== 'undefined' && AndroidBridge.copyToClipboard) {
+    AndroidBridge.copyToClipboard(text);
+    toast('📋 Copied to clipboard');
+  } else {
+    try { navigator.clipboard.writeText(text); toast('📋 Copied'); } catch(e) { toast('Copy: open browser console'); }
+  }
+}
+
+// ── Intercept console ──
+const _origLog = console.log.bind(console);
+const _origWarn = console.warn.bind(console);
+const _origErr = console.error.bind(console);
+console.log   = (...a) => { _origLog(...a);  dbg('LOG',  ...a); };
+console.warn  = (...a) => { _origWarn(...a); dbg('WARN', ...a); };
+console.error = (...a) => { _origErr(...a);  dbg('ERR',  ...a); };
+
+// ── Uncaught errors ──
+window.onerror = (msg, src, line, col, err) => {
+  dbg('ERR', `Uncaught: ${msg} @ ${src}:${line}:${col}`);
+  return false;
+};
+window.onunhandledrejection = (e) => {
+  dbg('ERR', 'Unhandled promise rejection:', e.reason);
+};
+
+// ── Shake to open (accelerometer) ──
+(function() {
+  let lastX=0, lastY=0, lastZ=0, shakeCount=0, lastShake=0;
+  window.addEventListener('devicemotion', e => {
+    const acc = e.accelerationIncludingGravity;
+    if (!acc) return;
+    const dx = Math.abs(acc.x - lastX);
+    const dy = Math.abs(acc.y - lastY);
+    const dz = Math.abs(acc.z - lastZ);
+    lastX=acc.x; lastY=acc.y; lastZ=acc.z;
+    if (dx+dy+dz > 25) {
+      const now = Date.now();
+      if (now - lastShake > 500) { shakeCount++; lastShake = now; }
+      if (shakeCount >= 3) { shakeCount=0; toggleDebug(); }
+    }
+  });
+})();
+
+// ── Tap topbar 5 ครั้ง เพื่อเปิด ──
+document.addEventListener('DOMContentLoaded', () => {
+  const tb = document.getElementById('topbar-title');
+  if (tb) {
+    tb.addEventListener('click', () => {
+      _tapCount++;
+      clearTimeout(_tapTimer);
+      if (_tapCount >= 5) { _tapCount=0; toggleDebug(); }
+      else { _tapTimer = setTimeout(() => { _tapCount=0; }, 2000); }
+    });
+  }
+});
+
+// ── Test function: โหลดรูปจาก drive_public_url ของ entry แรก ──
+function testImageLoad() {
+  const e = SOURCE && SOURCE[idx];
+  if (!e) { dbg('IMG', 'No entry loaded yet'); return; }
+  const url = getUrl(e);
+  dbg('IMG', 'Testing URL:', url);
+  dbg('IMG', 'drive_public_url:', e.drive_public_url || '(none)');
+  dbg('IMG', 'AndroidBridge available:', typeof AndroidBridge !== 'undefined');
+  if (typeof AndroidBridge !== 'undefined') {
+    dbg('IMG', 'fetchImage available:', typeof AndroidBridge.fetchImage !== 'undefined');
+  }
+
+  // ทดสอบ native fetch
+  loadImageNative(url,
+    (src) => {
+      dbg('IMG', '✓ loadImageNative SUCCESS, src type:', src.startsWith('data:') ? 'base64 data URI' : 'URL', 'length:', src.length);
+    },
+    (err) => {
+      dbg('ERR', '✗ loadImageNative FAILED:', err);
+
+      // ทดสอบ img.src ตรงๆ เพื่อเปรียบเทียบ
+      const testImg = new Image();
+      testImg.crossOrigin = 'anonymous';
+      testImg.onload = () => dbg('IMG', '✓ Direct img.src SUCCESS (fallback)');
+      testImg.onerror = (ev) => dbg('ERR', '✗ Direct img.src FAILED too:', ev.type);
+      testImg.src = url;
+      dbg('IMG', 'Trying direct img.src fallback...');
+    }
+  );
+}
+
+
 const DATA_URL = 'https://raw.githubusercontent.com/sp33dz/tv-screenshot/refs/heads/main/gallery/data.json';
 const SPEEDS   = [0.25, 0.5, 1, 2, 4, 8];   // maps to range 0-5
 const PRELOAD  = 5;
@@ -763,17 +907,20 @@ function loadImageNative(url, onSuccess, onError) {
   // ถ้าอยู่ใน Android WebView ให้ใช้ Java fetch (bypass CORS + redirect)
   if (typeof AndroidBridge !== 'undefined' && AndroidBridge.fetchImage) {
     const cbId = 'cb_' + (++_cbCounter);
+    dbg('NET', 'Java fetch start cbId=' + cbId + ' url=' + url.substr(0,80));
     window._imgCallbacks[cbId] = function(dataUri, err) {
       if (dataUri) {
+        dbg('NET', '✓ Java fetch OK cbId=' + cbId + ' dataUri.len=' + dataUri.length);
         onSuccess(dataUri);
       } else {
-        // Java fetch ล้มเหลว → fallback ลอง img.src ตรงๆ
+        dbg('ERR', '✗ Java fetch FAIL cbId=' + cbId + ' err=' + err);
         onError(err || 'fetch failed');
       }
     };
     AndroidBridge.fetchImage(url, cbId);
   } else {
     // Web browser: ใช้ img.src ตามปกติ
+    dbg('NET', 'Browser mode, using direct src: ' + url.substr(0,80));
     onSuccess(url);
   }
 }
@@ -955,14 +1102,16 @@ function renderFrame() {
 
   const cached = imgCache.get(url);
   if (cached && cached.complete && cached.naturalWidth > 0) {
+    dbg('IMG', 'Cache HIT idx=' + idx + ' url=' + url.substr(0,60));
     applyImage(cached, e);
     loader.style.display = 'none';
   } else {
+    dbg('IMG', 'Cache MISS idx=' + idx + ' url=' + url.substr(0,60));
     const newImg = new Image();
-    // ใช้ loadImageNative: Android → Java fetch (handle redirect), Web → img.src ตรงๆ
     loadImageNative(url,
       (src) => {
         newImg.onload = () => {
+          dbg('IMG', '✓ Loaded w=' + newImg.naturalWidth + ' h=' + newImg.naturalHeight);
           imgCache.set(url, newImg);
           if (SOURCE[idx] === e) {
             applyImage(newImg, e);
@@ -970,6 +1119,7 @@ function renderFrame() {
           }
         };
         newImg.onerror = () => {
+          dbg('ERR', '✗ img onerror for url=' + url.substr(0,60));
           loader.style.display = 'none';
           toast('⚠️ Image load failed');
         };
@@ -977,6 +1127,7 @@ function renderFrame() {
         imgCache.set(url, newImg);
       },
       (err) => {
+        dbg('ERR', '✗ loadImageNative err: ' + err);
         loader.style.display = 'none';
         toast('⚠️ Image load failed');
       }

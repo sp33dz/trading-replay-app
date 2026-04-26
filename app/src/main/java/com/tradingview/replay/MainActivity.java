@@ -1,11 +1,15 @@
 package com.tradingview.replay;
 
 import android.annotation.SuppressLint;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
@@ -30,6 +34,7 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
+    private static final String TAG = "TradingReplay";
     private WebView webView;
     private boolean isFullscreen = false;
     private WindowInsetsControllerCompat insetsController;
@@ -106,6 +111,7 @@ public class MainActivity extends AppCompatActivity {
         int maxRedirects = 8;
 
         for (int i = 0; i < maxRedirects; i++) {
+            Log.d(TAG, "HTTP GET attempt " + i + ": " + currentUrl);
             URL url = new URL(currentUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setInstanceFollowRedirects(false);
@@ -119,24 +125,25 @@ public class MainActivity extends AppCompatActivity {
             conn.setRequestProperty("Referer", "https://drive.google.com/");
             conn.setRequestProperty("Origin", "https://drive.google.com");
 
-            // ส่ง cookies ที่ WebView มีอยู่ (ถ้ามี)
             String cookies = CookieManager.getInstance().getCookie(currentUrl);
             if (cookies != null && !cookies.isEmpty()) {
                 conn.setRequestProperty("Cookie", cookies);
+                Log.d(TAG, "Sending cookies len=" + cookies.length());
             }
 
             int status = conn.getResponseCode();
+            String contentType = conn.getContentType();
+            Log.d(TAG, "HTTP status=" + status + " contentType=" + contentType);
 
-            // Handle redirect (301, 302, 303, 307, 308)
             if (status == HttpURLConnection.HTTP_MOVED_PERM ||
                 status == HttpURLConnection.HTTP_MOVED_TEMP ||
                 status == HttpURLConnection.HTTP_SEE_OTHER ||
                 status == 307 || status == 308) {
 
                 String location = conn.getHeaderField("Location");
+                Log.d(TAG, "Redirect → " + location);
                 conn.disconnect();
                 if (location == null || location.isEmpty()) break;
-                // Handle relative redirect
                 if (location.startsWith("/")) {
                     URL base = new URL(currentUrl);
                     location = base.getProtocol() + "://" + base.getHost() + location;
@@ -146,11 +153,19 @@ public class MainActivity extends AppCompatActivity {
             }
 
             if (status != HttpURLConnection.HTTP_OK) {
+                // อ่าน error body เพื่อ debug
+                InputStream es = conn.getErrorStream();
+                String errBody = "";
+                if (es != null) {
+                    byte[] buf = new byte[512];
+                    int n = es.read(buf);
+                    errBody = n > 0 ? new String(buf, 0, n) : "";
+                    es.close();
+                }
                 conn.disconnect();
-                throw new Exception("HTTP " + status + " for " + currentUrl);
+                throw new Exception("HTTP " + status + " body=" + errBody.replace("\n"," ").substring(0, Math.min(errBody.length(),200)));
             }
 
-            // อ่าน response body
             InputStream is = conn.getInputStream();
             ByteArrayOutputStream buffer = new ByteArrayOutputStream();
             byte[] chunk = new byte[8192];
@@ -160,7 +175,9 @@ public class MainActivity extends AppCompatActivity {
             }
             is.close();
             conn.disconnect();
-            return buffer.toByteArray();
+            byte[] result = buffer.toByteArray();
+            Log.d(TAG, "Downloaded " + result.length + " bytes, contentType=" + contentType);
+            return result;
         }
         throw new Exception("Too many redirects for: " + urlStr);
     }
@@ -185,24 +202,29 @@ public class MainActivity extends AppCompatActivity {
         // ─── fetchImage: JS เรียก → Java โหลดรูป → callback กลับ JS เป็น base64 ───
         @JavascriptInterface
         public void fetchImage(String urlStr, String callbackId) {
+            Log.d(TAG, "fetchImage called: cbId=" + callbackId + " url=" + urlStr);
             executor.submit(() -> {
                 try {
                     byte[] imageBytes = httpGetBytes(urlStr);
-                    // ตรวจว่าได้ image bytes จริง (ไม่ใช่ HTML redirect page)
                     if (imageBytes.length < 100) {
-                        throw new Exception("Response too small, likely not an image");
+                        throw new Exception("Response too small (" + imageBytes.length + " bytes), likely not an image");
                     }
-                    // เช็ค magic bytes ว่าเป็น image จริง
                     boolean isImage = isImageBytes(imageBytes);
+                    Log.d(TAG, "isImage=" + isImage + " bytes=" + imageBytes.length
+                        + " magic=" + String.format("%02X %02X %02X %02X",
+                            imageBytes[0]&0xFF, imageBytes[1]&0xFF,
+                            imageBytes[2]&0xFF, imageBytes[3]&0xFF));
                     if (!isImage) {
-                        throw new Exception("Response is not an image (got HTML/redirect page)");
+                        // แสดง 200 chars แรกของ response เพื่อ debug
+                        String preview = new String(imageBytes, 0, Math.min(200, imageBytes.length));
+                        throw new Exception("Not an image. Response preview: " + preview.replace("\n"," "));
                     }
 
                     String b64 = Base64.encodeToString(imageBytes, Base64.NO_WRAP);
                     String mimeType = detectMime(imageBytes);
                     String dataUri = "data:" + mimeType + ";base64," + b64;
+                    Log.d(TAG, "fetchImage success: mime=" + mimeType + " b64len=" + b64.length());
 
-                    // ส่งกลับ JS บน main thread
                     String escaped = dataUri.replace("\\", "\\\\").replace("'", "\\'");
                     mainHandler.post(() -> webView.evaluateJavascript(
                         "window._imgCallback('" + callbackId + "', '" + escaped + "', null);",
@@ -210,12 +232,28 @@ public class MainActivity extends AppCompatActivity {
                     ));
 
                 } catch (Exception e) {
-                    String errMsg = e.getMessage() != null ? e.getMessage().replace("'", "\\'") : "fetch error";
+                    Log.e(TAG, "fetchImage error: " + e.getMessage(), e);
+                    String errMsg = e.getMessage() != null
+                        ? e.getMessage().replace("'", "\\'").replace("\n", " ")
+                        : "fetch error";
+                    // ตัดให้สั้นลงเพื่อไม่ให้ JS string ยาวเกินไป
+                    if (errMsg.length() > 300) errMsg = errMsg.substring(0, 300);
+                    final String finalErr = errMsg;
                     mainHandler.post(() -> webView.evaluateJavascript(
-                        "window._imgCallback('" + callbackId + "', null, '" + errMsg + "');",
+                        "window._imgCallback('" + callbackId + "', null, '" + finalErr + "');",
                         null
                     ));
                 }
+            });
+        }
+
+        @JavascriptInterface
+        public void copyToClipboard(String text) {
+            mainHandler.post(() -> {
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData clip = ClipData.newPlainText("Debug Log", text);
+                clipboard.setPrimaryClip(clip);
+                Toast.makeText(MainActivity.this, "Copied to clipboard", Toast.LENGTH_SHORT).show();
             });
         }
 
