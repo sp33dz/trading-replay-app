@@ -1100,36 +1100,46 @@ function renderFrame() {
   // Show loader
   loader.style.display = '';
 
+  // imgCache เก็บ { src: dataUri/url, w, h } เพื่อหลีกเลี่ยง Image object stale
   const cached = imgCache.get(url);
-  if (cached && cached.complete && cached.naturalWidth > 0) {
-    dbg('IMG', 'Cache HIT idx=' + idx + ' url=' + url.substr(0,60));
-    applyImage(cached, e);
+  if (cached && cached.w > 0) {
+    dbg('IMG', 'Cache HIT idx=' + idx + ' w=' + cached.w + ' h=' + cached.h);
+    applyImageSrc(cached.src, cached.w, cached.h, e);
     loader.style.display = 'none';
   } else {
     dbg('IMG', 'Cache MISS idx=' + idx + ' url=' + url.substr(0,60));
-    const newImg = new Image();
+    // เก็บ entry reference ไว้ตรวจสอบ stale
+    const targetEntry = e;
     loadImageNative(url,
       (src) => {
-        newImg.onload = () => {
-          dbg('IMG', '✓ Loaded w=' + newImg.naturalWidth + ' h=' + newImg.naturalHeight);
-          imgCache.set(url, newImg);
-          if (SOURCE[idx] === e) {
-            applyImage(newImg, e);
+        const tmpImg = new Image();
+        tmpImg.onload = () => {
+          const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
+          dbg('IMG', '✓ Loaded w=' + w + ' h=' + h + ' src.len=' + src.length);
+          imgCache.set(url, { src, w, h });
+          // แสดงถ้า entry ยังตรงกับที่กำลังแสดงอยู่ (ไม่ใช่ stale preload)
+          if (SOURCE[idx] === targetEntry) {
+            applyImageSrc(src, w, h, targetEntry);
             loader.style.display = 'none';
+          } else {
+            dbg('IMG', 'Stale cb, skip apply (current idx=' + idx + ')');
           }
         };
-        newImg.onerror = () => {
-          dbg('ERR', '✗ img onerror for url=' + url.substr(0,60));
-          loader.style.display = 'none';
-          toast('⚠️ Image load failed');
+        tmpImg.onerror = () => {
+          dbg('ERR', '✗ tmpImg onerror');
+          if (SOURCE[idx] === targetEntry) {
+            loader.style.display = 'none';
+            toast('⚠️ Image load failed');
+          }
         };
-        newImg.src = src;
-        imgCache.set(url, newImg);
+        tmpImg.src = src;
       },
       (err) => {
         dbg('ERR', '✗ loadImageNative err: ' + err);
-        loader.style.display = 'none';
-        toast('⚠️ Image load failed');
+        if (SOURCE[idx] === targetEntry) {
+          loader.style.display = 'none';
+          toast('⚠️ Image load failed');
+        }
       }
     );
   }
@@ -1157,10 +1167,16 @@ function renderFrame() {
   }
 }
 
-function applyImage(srcImg, entry) {
-  img.src = srcImg.src;
+function applyImageSrc(src, w, h, entry) {
+  dbg('IMG', 'applyImageSrc w=' + w + ' h=' + h + ' src.len=' + src.length);
+  img.src = src;
   img.classList.add('loaded');
-  fitImage(srcImg.naturalWidth, srcImg.naturalHeight);
+  fitImage(w, h);
+}
+
+// legacy compat (gallery)
+function applyImage(srcImg, entry) {
+  applyImageSrc(srcImg.src, srcImg.naturalWidth, srcImg.naturalHeight, entry);
 }
 
 function fitImage(natW, natH) {
@@ -1191,15 +1207,22 @@ function preloadAround(ci) {
     const url = getUrl(SOURCE[i]);
     keep.add(url);
     if (!imgCache.has(url)) {
-      const pi = new Image();
+      // เพิ่ม placeholder ก่อนเพื่อกัน duplicate request
+      imgCache.set(url, { src: null, w: 0, h: 0, pending: true });
       loadImageNative(url,
-        (src) => { pi.src = src; },
-        () => {}
+        (src) => {
+          const pi = new Image();
+          pi.onload = () => {
+            // อัปเดต cache entry พร้อม w/h จริง
+            imgCache.set(url, { src, w: pi.naturalWidth, h: pi.naturalHeight });
+          };
+          pi.src = src;
+        },
+        () => { imgCache.delete(url); }
       );
-      imgCache.set(url, pi);
     }
   }
-  for (const [url] of imgCache) {
+  for (const [url, entry] of imgCache) {
     if (!keep.has(url)) imgCache.delete(url);
   }
 }
